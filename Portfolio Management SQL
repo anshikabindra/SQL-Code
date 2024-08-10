@@ -89,15 +89,18 @@ SELECT DT,Narration,Closing_Balance,Withdrawal_Amt,Deposit_Amt,
           END AS W_OR_D
 	FROM hdfc_bank
 SELECT * FROM axis
-
-SELECT
-    (SELECT BAL
-     FROM axis
-     WHERE Tran_Date < '2023-04-01'
-     ORDER BY Tran_Date DESC
-     LIMIT 1
-    ) + 
-    (SELECT IFNULL(SUM(CR) - SUM(DR), 0)
-     FROM axis
-     WHERE Tran_Date BETWEEN DATE'2023-04-01' AND LAST_DAY('2023-04-30')
-    ) AS ending_balance;
+SELECT Tran_Date,
+    YEAR(Tran_Date) AS year,
+    MONTH(Tran_Date) AS month
+FROM axis
+ORDER BY year, month;
+SELECT BAL
+select year,month,tran_date,bal
+from axis 
+inner join (
+SELECT Max(SRL_NO) as max_srlno,
+YEAR(Tran_Date) AS year,
+MONTH(Tran_Date) as month
+FROM axis
+GROUP BY year,month ) as moti
+on SRL_NO = max_srlno
