@@ -457,7 +457,10 @@ def upload_csv():
     return redirect(request.referrer)
 
 
-# ---------------- CHATBOT TRANSACTION TERMINAL ---------------- #
+import re
+
+
+# ---------------- NATURAL LANGUAGE CHATBOT TERMINAL ---------------- #
 
 @app.route('/chatbot', methods=['POST'])
 def chatbot():
@@ -483,187 +486,224 @@ def chatbot():
         'private equity': 'private_equity'
     }
 
-    # 1. HANDLE DELETE COMMAND BY NARRATION/NAME (e.g., delete bank | Salary)
-    if user_message_lower.startswith('delete '):
-        if '|' in user_message:
-            parts = [p.strip() for p in user_message.split('|')]
-            cmd_header = parts[0].split()
-            if len(cmd_header) >= 2:
-                asset_key = " ".join(cmd_header[1:]).lower()
-                target_identifier = parts[1]
-                table_name = table_map.get(asset_key)
+    # Find which asset class the user is talking about
+    target_asset = None
+    for key in table_map.keys():
+        if key in user_message_lower:
+            target_asset = key
+            break
 
-                if table_name:
-                    # Dynamically match identifier column name based on asset type
-                    ident_column = 'investment_name' if asset_key in ['gold', 'real estate', 'cash', 'private equity'] else 'Narration'
-                    if asset_key in ['equity', 'mutual fund', 'mf']:
-                        ident_column = 'Company_name'
-                    elif asset_key == 'fd':
-                        ident_column = 'Portfolio_name'
+    # --- 1. NATURAL LANGUAGE DETECTOR: DELETE ---
+    # Matches: "delete ATM Run from bank", "remove rent from pf", "delete this transaction from bank: Gym"
+    if any(w in user_message_lower for w in ['delete', 'remove', 'drop', 'clear']):
+        if not target_asset:
+            return jsonify({
+                               "reply": "I can help you delete that! Which asset or category (Bank, Gold, Equity, etc.) should I remove it from?"})
 
-                    try:
-                        conn = mysql.connector.connect(**db_config)
-                        cursor = conn.cursor()
-                        # Secures action via user_id, targets rows via Narration/Name
-                        query = f"DELETE FROM {table_name} WHERE {ident_column} = %s AND user_id = %s"
-                        cursor.execute(query, (target_identifier, user_id))
-                        conn.commit()
-                        affected = cursor.rowcount
-                        cursor.close()
-                        conn.close()
+        table_name = table_map[target_asset]
 
-                        if affected > 0:
-                            return jsonify({"reply": f"✅ Successfully deleted records matching '{target_identifier}' from your {asset_key.upper()} ledger."})
-                        else:
-                            return jsonify({"reply": f"❌ No records found matching '{target_identifier}' under your profile."})
-                    except Exception as e:
-                        return jsonify({"reply": f"❌ Error deleting row: {str(e)}"})
+        # Determine identifying column based on asset types
+        ident_column = 'investment_name' if target_asset in ['gold', 'real estate', 'cash',
+                                                             'private_equity'] else 'Narration'
+        if target_asset in ['equity', 'mutual fund', 'mf']:
+            ident_column = 'Company_name'
+        elif target_asset == 'fd':
+            ident_column = 'Portfolio_name'
 
-        return jsonify({"reply": "💡 **Delete Syntax:** `delete [asset_type] | [Narration/Name]` (Example: `delete bank | ATM Cash Run` or `delete gold | Bullion Coin`)"})
+        # Extract the target value by cleaning out the common phrasing keywords
+        clean_text = re.sub(r'\b(delete|remove|drop|clear|from|this|transaction|asset|in|the|ledger)\b', '',
+                            user_message_lower).replace(target_asset, '').strip()
+        # Strip trailing punctuation if any
+        clean_text = clean_text.strip("':\",.?!")
 
-    # 2. HANDLE MODIFY COMMAND BY NARRATION/NAME (e.g., modify bank | Old Text | narration | New Text)
-    if user_message_lower.startswith('modify '):
-        if '|' in user_message:
-            parts = [p.strip() for p in user_message.split('|')]
-            cmd_header = parts[0].split()
-            if len(cmd_header) >= 2 and len(parts) >= 4:
-                asset_key = " ".join(cmd_header[1:]).lower()
-                target_identifier = parts[1]
-                field = parts[2].lower()
-                new_value = parts[3]
-                table_name = table_map.get(asset_key)
+        if not clean_text:
+            return jsonify({
+                               "reply": f"Which specific transaction title or description would you like to delete from your {target_asset.upper()} records?"})
 
-                if table_name:
-                    ident_column = 'investment_name' if asset_key in ['gold', 'real estate', 'cash', 'private equity'] else 'Narration'
-                    if asset_key in ['equity', 'mutual fund', 'mf']:
-                        ident_column = 'Company_name'
-                    elif asset_key == 'fd':
-                        ident_column = 'Portfolio_name'
+        try:
+            conn = sql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME)
+            cursor = conn.cursor()
 
-                    # Field naming map aligning with your exact database casings
-                    field_map = {
-                        'narration': 'Narration',
-                        'company': 'Company_name',
-                        'quantity': 'Quantity',
-                        'qty': 'Quantity',
-                        'rate': 'Transaction_rate',
-                        'name': 'investment_name',
-                        'chq_ref_no': 'CHq_Ref_No',
-                        'bank_name': 'bank_name'
-                    }
-                    actual_field = field_map.get(field, field)
+            # Search securely for transactions using a flexible LIKE match under your account profile
+            query = f"DELETE FROM {table_name} WHERE LOWER({ident_column}) LIKE %s AND user_id = %s"
+            cursor.execute(query, (f"%{clean_text}%", user_id))
+            conn.commit()
+            affected = cursor.rowcount
+            cursor.close()
+            conn.close()
 
-                    # Manage Withdrawal / Deposit distribution routing dynamically for simple text allocations
-                    if asset_key in ['bank', 'pf'] and field == 'amount':
-                        try:
-                            val = float(new_value)
-                            if val >= 0:
-                                query = f"UPDATE {table_name} SET Deposit_Amt = %s, Withdrawal_Amt = 0 WHERE {ident_column} = %s AND user_id = %s"
-                            else:
-                                query = f"UPDATE {table_name} SET Withdrawal_Amt = %s, Deposit_Amt = 0 WHERE {ident_column} = %s AND user_id = %s"
-                                val = abs(val)
-                            new_value = val
-                        except ValueError:
-                            return jsonify({"reply": "❌ Amount parameters must remain purely numeric numbers."})
-                    else:
-                        query = f"UPDATE {table_name} SET {actual_field} = %s WHERE {ident_column} = %s AND user_id = %s"
+            if affected > 0:
+                return jsonify({
+                                   "reply": f"✅ Successfully deleted entries matching '<strong>{clean_text}</strong>' from your {target_asset.upper()} ledger rows."})
+            else:
+                return jsonify({
+                                   "reply": f"❌ Couldn't find any records matching '{clean_text}' inside your active {target_asset.upper()} list."})
+        except Exception as e:
+            return jsonify({"reply": f"❌ Error executing transaction drop: {str(e)}"})
 
-                    try:
-                        conn = mysql.connector.connect(**db_config)
-                        cursor = conn.cursor()
-                        cursor.execute(query, (new_value, target_identifier, user_id))
-                        conn.commit()
-                        affected = cursor.rowcount
-                        cursor.close()
-                        conn.close()
+    # --- 2. NATURAL LANGUAGE DETECTOR: MODIFY/CHANGE ---
+    # Matches: "change salary to bonus in bank", "modify bank by changing rent to utilities", "change tech stocks to apple in equity"
+    elif any(w in user_message_lower for w in ['change', 'modify', 'update', 'correct']):
+        if not target_asset:
+            return jsonify({
+                               "reply": "I see you want to modify a transaction. Which asset class or category tab is it located under?"})
 
-                        if affected > 0:
-                            return jsonify({"reply": f"✅ Successfully updated entries matching '{target_identifier}' in {asset_key.upper()} ({field} -> {new_value})."})
-                        else:
-                            return jsonify({"reply": f"❌ No matching records found under your account profile lines."})
-                    except Exception as e:
-                        return jsonify({"reply": f"❌ Database mutation error: {str(e)}"})
+        table_name = table_map[target_asset]
 
-        return jsonify({"reply": "💡 **Modify Syntax:** `modify [asset] | [Current Narration/Name] | [Field] | [New Value]` (Example: `modify bank | Old Salary | narration | Updated Salary`)"})
+        ident_column = 'investment_name' if target_asset in ['gold', 'real estate', 'cash',
+                                                             'private_equity'] else 'Narration'
+        if target_asset in ['equity', 'mutual fund', 'mf']:
+            ident_column = 'Company_name'
+        elif target_asset == 'fd':
+            ident_column = 'Portfolio_name'
 
-    # 3. HANDLE ADD COMMAND USING PIPE SEPARATORS
-    if user_message_lower.startswith('add '):
-        if '|' in user_message:
-            parts = [p.strip() for p in user_message.split('|')]
-            cmd_header = parts[0].split()
-            if len(cmd_header) >= 2:
-                asset_key = " ".join(cmd_header[1:]).lower()
-                table_name = table_map.get(asset_key)
+        # Look for natural transitions like "from X to Y" or "X to Y"
+        match_from_to = re.search(r'(?:changing|change|from)?\s*(.*?)\s+to\s+(.*)', user_message, re.IGNORECASE)
 
-                # Handle Banking & Provident Fund Ledgers matching exact columns
-                if table_name in ['bank_transaction', 'pf'] and len(parts) >= 3:
-                    narration = parts[1]
-                    try:
-                        amt = float(parts[2])
-                        dep = amt if amt >= 0 else 0
-                        wit = abs(amt) if amt < 0 else 0
+        if match_from_to:
+            old_val = match_from_to.group(1).strip()
+            new_val = match_from_to.group(2).strip()
 
-                        conn = mysql.connector.connect(**db_config)
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            f"INSERT INTO {table_name} (DT, Narration, Deposit_Amt, Withdrawal_Amt, Value_Dt, user_id) VALUES (CURDATE(), %s, %s, %s, CURDATE(), %s)",
-                            (narration, dep, wit, user_id)
-                        )
-                        conn.commit()
-                        cursor.close()
-                        conn.close()
-                        return jsonify({"reply": f"✅ Posted transaction to {asset_key.upper()}: '{narration}' (₹{amt})."})
-                    except Exception as e:
-                        return jsonify({"reply": f"❌ Insertion error: {str(e)}"})
+            # Clean up trailing words like "in bank", "from gold" from the extracted new value string
+            new_val = re.sub(r'\b(in|from|under|inside|asset|the|ledger)\b.*', '', new_val, flags=re.IGNORECASE).strip()
+            old_val = re.sub(r'\b(this|transaction|the)\b', '', old_val, flags=re.IGNORECASE).strip()
 
-                # Handle Gold Commodities
-                elif table_name == 'gold_investments' and len(parts) >= 4:
-                    name = parts[1]
-                    try:
-                        rate = float(parts[2])
-                        qty = float(parts[3])
+            # Strip punctuation handles
+            old_val = old_val.strip("':\",.?!")
+            new_val = new_val.strip("':\",.?!")
 
-                        conn = mysql.connector.connect(**db_config)
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "INSERT INTO gold_investments (investment_name, value_per_gram, quantity, investment_date, user_id) VALUES (%s, %s, %s, CURDATE(), %s)",
-                            (name, rate, qty, user_id)
-                        )
-                        conn.commit()
-                        cursor.close()
-                        conn.close()
-                        return jsonify({"reply": f"✅ Logged commodity position to GOLD: '{name}' ({qty}g)."})
-                    except Exception as e:
-                        return jsonify({"reply": f"❌ Commodity post error: {str(e)}"})
+            try:
+                conn = sql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME)
+                cursor = conn.cursor()
 
-                # Handle Asset Markets (Equities / Mutual Funds)
-                elif table_name in ['equity_transactions', 'Mutual_Fund_transactions'] and len(parts) >= 5:
-                    comp = parts[1]
-                    try:
-                        rate = float(parts[2])
-                        qty = int(parts[3])
-                        tx_type = parts[4]
+                query = f"UPDATE {table_name} SET {ident_column} = %s WHERE LOWER({ident_column}) LIKE %s AND user_id = %s"
+                cursor.execute(query, (new_val, f"%{old_val.lower()}%", user_id))
+                conn.commit()
+                affected = cursor.rowcount
+                cursor.close()
+                conn.close()
 
-                        conn = mysql.connector.connect(**db_config)
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            f"INSERT INTO {table_name} (Company_name, Transaction_date, Transaction_rate, Quantity, Transaction_type, user_id) VALUES (%s, CURDATE(), %s, %s, %s, %s)",
-                            (comp, rate, qty, tx_type, user_id)
-                        )
-                        conn.commit()
-                        cursor.close()
-                        conn.close()
-                        return jsonify({"reply": f"✅ Recorded security transaction inside {asset_key.upper()} registry."})
-                    except Exception as e:
-                        return jsonify({"reply": f"❌ Security tracking failure: {str(e)}"})
+                if affected > 0:
+                    return jsonify({
+                                       "reply": f"✅ Successfully updated your {target_asset.upper()} record title from '<strong>{old_val}</strong>' to '<strong>{new_val}</strong>'."})
+                else:
+                    return jsonify({
+                                       "reply": f"❌ Couldn't locate a transaction matching '{old_val}' under your profile parameters."})
+            except Exception as e:
+                return jsonify({"reply": f"❌ Modification pipeline error: {str(e)}"})
 
-        return jsonify({"reply": "💡 **Add Command Formats (Use '|' as separators):**<br>"
-                                 "• `add bank | Salary Input | 45000`<br>"
-                                 "• `add bank | ATM Cash Run | -2000`<br>"
-                                 "• `add gold | Bullion Coin | 6300 | 10`<br>"
-                                 "• `add equity | Tata Motors | 920 | 25 | Buy`"})
+        return jsonify({
+                           "reply": "💡 Try phrasing modifications naturally like this: *'Change Salary to Bonus in Bank'* or *'Modify Equity by changing Google to Alphabet'*."})
 
-    return jsonify({"reply": "I am ready for transactions! Use commands like `add bank | text | amt`, `modify bank | current_narration | field | new_val`, or `delete bank | narration`."})
+    # --- 3. NATURAL LANGUAGE DETECTOR: TOTAL CALCULATION ---
+    # Matches: "what is the total bank deposit_amt?", "total gold quantity"
+    elif 'total' in user_message_lower:
+        if not target_asset:
+            return jsonify({"reply": "Which specific ledger or asset category would you like me to sum up totals for?"})
+
+        table_name = table_map[target_asset]
+
+        allowed_fields = [
+            'withdrawal_amt', 'deposit_amt', 'closing_balance', 'principal_amt',
+            'rate', 'opening_balance', 'current_value', 'transaction_rate',
+            'quantity', 'value_per_gram', 'invested_value', 'invested_value_per_share',
+            'no_of_units', 'current_value_per_share', 'no_of_shares_issued'
+        ]
+
+        field_casing_map = {
+            'withdrawal_amt': 'Withdrawal_Amt', 'deposit_amt': 'Deposit_Amt', 'closing_balance': 'Closing_Balance',
+            'principal_amt': 'Principal_amt', 'rate': 'Rate', 'opening_balance': 'Opening_Balance',
+            'current_value': 'Current_value', 'transaction_rate': 'Transaction_rate', 'quantity': 'Quantity',
+            'value_per_gram': 'value_per_gram', 'invested_value': 'Invested_value',
+            'invested_value_per_share': 'Invested_value_per_share', 'no_of_units': 'No_of_units',
+            'current_value_per_share': 'Current_value_per_share', 'no_of_shares_issued': 'No_of_shares_issued'
+        }
+
+        detected_field = None
+        for f in allowed_fields:
+            if f in user_message_lower:
+                detected_field = f
+                break
+
+        if detected_field:
+            actual_field = field_casing_map[detected_field]
+            try:
+                conn = sql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME)
+                cursor = conn.cursor()
+                query = f"SELECT SUM({actual_field}) FROM {table_name} WHERE user_id = %s"
+                cursor.execute(query, (user_id,))
+                result = cursor.fetchone()
+                total_sum = result[0] if result[0] is not None else 0.00
+                cursor.close()
+                conn.close()
+
+                return jsonify({
+                                   "reply": f"📊 The calculated total for <strong>{detected_field.upper()}</strong> in your <strong>{target_asset.upper()}</strong> data matches: <strong>₹{total_sum:,.2f}</strong>"})
+            except Exception as e:
+                return jsonify({"reply": f"❌ Calculation parsing fault: {str(e)}"})
+        else:
+            return jsonify({
+                               "reply": f"Which column property would you like computed? Try asking: *'Total bank deposit_amt'* or *'What is my total gold quantity?'*"})
+
+    # --- 4. NATURAL LANGUAGE DETECTOR: ADDING ---
+    # Matches: "add a bank transaction for groceries worth -1500", "add gold entry for coin worth 6400 with quantity 5"
+    elif user_message_lower.startswith('add '):
+        # Fallback to display example pattern if text doesn't contain numerical inputs
+        numbers = re.findall(r'[-+]?\d*\.\d+|\d+', user_message)
+        if not target_asset or not numbers:
+            return jsonify({"reply": "💡 **To add an item, phrase it with numbers like this:**<br>"
+                                     "• *'Add a bank transaction for Freelance Design worth 5000'*<br>"
+                                     "• *'Add gold position for 24K Coin at rate 6200 and quantity 10'*"})
+
+        table_name = table_map[target_asset]
+        clean_narr = re.sub(
+            r'\b(add|bank|gold|equity|mf|pf|transaction|entry|position|for|worth|at|rate|quantity|with|value)\b', '',
+            user_message_lower).strip()
+        clean_narr = re.sub(r'[-+]?\d*\.\d+|\d+', '', clean_narr).strip().strip("|,.-_")
+
+        try:
+            conn = sql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME)
+            cursor = conn.cursor()
+
+            if table_name in ['bank_transaction', 'pf']:
+                amt = float(numbers[0])
+                dep = amt if amt >= 0 else 0
+                wit = abs(amt) if amt < 0 else 0
+                cursor.execute(
+                    f"INSERT INTO {table_name} (DT, Narration, Deposit_Amt, Withdrawal_Amt, Value_Dt, user_id) VALUES (CURDATE(), %s, %s, %s, CURDATE(), %s)",
+                    (clean_narr.capitalize() or "Manual Entry", dep, wit, user_id)
+                )
+            elif table_name == 'gold_investments' and len(numbers) >= 2:
+                rate = float(numbers[0])
+                qty = float(numbers[1])
+                cursor.execute(
+                    "INSERT INTO gold_investments (investment_name, value_per_gram, quantity, investment_date, user_id) VALUES (%s, %s, %s, CURDATE(), %s)",
+                    (clean_narr.capitalize() or "Gold Asset", rate, qty, user_id)
+                )
+            elif table_name in ['equity_transactions', 'Mutual_Fund_transactions'] and len(numbers) >= 2:
+                rate = float(numbers[0])
+                qty = int(numbers[1])
+                tx_type = "Buy" if "sell" not in user_message_lower else "Sell"
+                cursor.execute(
+                    f"INSERT INTO {table_name} (Company_name, Transaction_date, Transaction_rate, Quantity, Transaction_type, user_id) VALUES (%s, CURDATE(), %s, %s, %s, %s)",
+                    (clean_narr.upper() or "SECURITY", rate, qty, tx_type, user_id)
+                )
+            else:
+                return jsonify({
+                                   "reply": "Could you provide both the financial rate/amount and the specific quantities required for that operation?"})
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return jsonify(
+                {"reply": f"✅ Successfully added your custom entry to <strong>{target_asset.upper()}</strong>!"})
+
+        except Exception as e:
+            return jsonify({"reply": f"❌ Record generation layout fault: {str(e)}"})
+
+    # Catch-all greeting / helper pattern response
+    return jsonify({
+                       "reply": "Hello! I am your helpful PortfolioHub assistant. How can I help you manage your financial tracking, asset visibility, or statement sheets today?"})
 
 
 # ---------------- BLUEPRINTS ---------------- #
