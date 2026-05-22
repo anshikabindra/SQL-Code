@@ -459,53 +459,62 @@
     }
 
     function submitPortfolioQuery() {
-      const field = document.getElementById('portfolioChatInput');
-      const text = field.value.trim();
-      if (!text) return;
+  const field = document.getElementById('portfolioChatInput');
+  const text = field.value.trim();
+  if (!text) return;
 
-      const windowFrame = document.getElementById('portfolioChatMessages');
+  const windowFrame = document.getElementById('portfolioChatMessages');
 
-      // Append Client Input Bubble
-      const userDiv = document.createElement('div');
-      userDiv.className = 'chat-bubble owner-bubble';
-      userDiv.textContent = text;
-      windowFrame.appendChild(userDiv);
+  // Append user message bubble dynamically
+  const userDiv = document.createElement('div');
+  userDiv.className = 'chat-bubble owner-bubble';
+  userDiv.textContent = text;
+  windowFrame.appendChild(userDiv);
 
-      field.value = '';
-      forceChatScrollToBottom();
+  field.value = '';
+  forceChatScrollToBottom();
 
-      // Dispatch payload to backend chatbot terminal
-      fetch('/chatbot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text })
-      })
-      .then(res => res.json())
-      .then(data => {
-        // Append Assistant Response Bubble
-        const botDiv = document.createElement('div');
-        botDiv.className = 'chat-bubble assistant-bubble';
-        botDiv.innerHTML = data.reply;
-        windowFrame.appendChild(botDiv);
-        forceChatScrollToBottom();
+  // Fire asynchronous dispatch query
+  fetch('/chatbot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: text })
+  })
+  .then(res => res.json())
+  .then(data => {
+    // Append Assistant response text parameters safely
+    const botDiv = document.createElement('div');
+    botDiv.className = 'chat-bubble assistant-bubble';
+    botDiv.innerHTML = data.reply;
+    windowFrame.appendChild(botDiv);
+    forceChatScrollToBottom();
 
-        // AUTOMATIC GRID REFRESH CONTROLLER
-        // If query message holds checkmark confirmation token, refresh context tables
-        if (data.reply.includes('✅')) {
-            setTimeout(() => {
-                window.location.reload();
-            }, 1500);
-        }
-      })
-      .catch(error => {
-        console.error("Assistant network exception:", error);
-        const errDiv = document.createElement('div');
-        errDiv.className = 'chat-bubble assistant-bubble';
-        errDiv.textContent = "Database connectivity timeout. Please double-check connection parameters.";
-        windowFrame.appendChild(errDiv);
-        forceChatScrollToBottom();
-      });
+    // SMOOTH ASYNC GRID REFRESH PIPELINE
+    // If successful (✅), reloads the background data grid without closing the chat interface!
+    if (data.reply.includes('✅')) {
+        fetch(window.location.href)
+        .then(response => response.text())
+        .then(html => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const newTable = doc.querySelector('.container .card:last-child');
+            const oldTable = document.querySelector('.container .card:last-child');
+            if(newTable && oldTable) {
+                // Instantly swaps the list view arrays in the background
+                oldTable.innerHTML = newTable.innerHTML;
+            }
+        });
     }
+  })
+  .catch(error => {
+    console.error("Link breakdown error caught:", error);
+    const errDiv = document.createElement('div');
+    errDiv.className = 'chat-bubble assistant-bubble';
+    errDiv.textContent = "Unable to reach server gateway rules. Please try re-firing that query.";
+    windowFrame.appendChild(errDiv);
+    forceChatScrollToBottom();
+  });
+}
   </script>
 
 </body>
